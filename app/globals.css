@@ -3,6 +3,7 @@
 :root {
   --background: #ffffff;
   --foreground: #171717;
+  --font-display: "BMW Type Next", var(--font-inter), Arial, sans-serif;
 }
 
 @theme inline {
