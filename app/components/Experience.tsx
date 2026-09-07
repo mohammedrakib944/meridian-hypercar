@@ -152,6 +152,12 @@ function HeroRig({
       minPolarAngle={Math.PI * 0.22}
       maxPolarAngle={Math.PI * 0.48}
       target={FULL_CAR_VIEW.lookAt}
+      // Touch is reserved entirely for the swipe-to-advance gesture (see the
+      // window touchmove handler below) - a single finger can't both orbit
+      // the hero and swipe between scenes without ambiguity, and scene
+      // navigation wins. Auto-rotate still keeps the hero car moving on
+      // mobile without needing drag input. Mouse-drag orbiting is untouched.
+      touches={{ ONE: undefined, TWO: undefined }}
     />
   );
 }
@@ -285,7 +291,7 @@ function LoadingOverlay({ ready }: { ready: boolean }) {
       className="pointer-events-none absolute inset-0 z-50 flex flex-col items-center justify-center gap-6 bg-[#0a0c10]"
     >
       <span
-        className="text-3xl sm:text-4xl text-white tracking-[0.08em] font-[family-name:var(--font-display)] font-extrabold"
+        className="text-3xl sm:text-4xl text-white tracking-[0.08em] font-[family-name:var(--font-display)] font-black"
         style={TEXT_GLOW}
       >
         BMW M4
@@ -344,7 +350,14 @@ export default function Experience() {
   const carHandles = useRef<CarHandles | null>(null);
   const pulseMesh = useRef<THREE.Mesh>(null);
   const pulseMaterial = useRef<THREE.MeshBasicMaterial>(null);
-  const engineAudio = useRef<HTMLAudioElement | null>(null);
+  // Web Audio API instead of HTMLAudioElement: each scroll tick gets its own
+  // short-lived source node with a natively-scheduled gain envelope, so
+  // there's no shared, stateful <audio> element to get stuck under rapid or
+  // long-running repeated triggering, and no GSAP-tween/main-thread-jank
+  // race to fight with the playback state.
+  const audioCtxRef = useRef<AudioContext | null>(null);
+  const audioBufferRef = useRef<AudioBuffer | null>(null);
+  const activeSourcesRef = useRef<Set<AudioBufferSourceNode>>(new Set());
   const finaleTimeline = useRef<gsap.core.Timeline | null>(null);
 
   const heroWordmarkRef = useRef<HTMLDivElement>(null);
@@ -354,6 +367,9 @@ export default function Experience() {
   const statRefs = useRef<Array<HTMLDivElement | null>>([]);
   const finaleFadeRef = useRef<HTMLDivElement>(null);
   const finaleWordmarkRef = useRef<HTMLDivElement>(null);
+  // Lets the hero's CTA buttons trigger scene jumps without pulling goToScene
+  // (defined inside the setup effect below) into component scope.
+  const goToSceneRef = useRef<(target: number) => void>(() => {});
 
   // Hoisted to component scope (rather than defined inside the setup effect
   // below) so the ready-watching effect can call it safely regardless of
@@ -371,7 +387,14 @@ export default function Experience() {
 
   useEffect(() => {
     mutedRef.current = muted;
-    if (muted) engineAudio.current?.pause();
+    if (muted) {
+      activeSourcesRef.current.forEach((s) => {
+        try {
+          s.stop();
+        } catch {}
+      });
+      activeSourcesRef.current.clear();
+    }
   }, [muted]);
 
   // Hero reveal waits for the model to actually finish loading instead of
@@ -382,33 +405,81 @@ export default function Experience() {
   }, [ready]);
 
   useEffect(() => {
-    engineAudio.current = new Audio("/sound/bmw-sound.mp3");
-    engineAudio.current.loop = false;
-    engineAudio.current.volume = 0.6;
+    const AudioCtx =
+      window.AudioContext ||
+      (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
+    const ctx = new AudioCtx();
+    audioCtxRef.current = ctx;
 
-    // Every scene change restarts the clip from frame zero so it always
-    // plays a full, fresh blip - never a fade that makes it seem to "stop".
-    // Restarts fresh on every scroll tick and keeps playing as long as ticks
-    // keep coming; killTweensOf cancels any pending fade-out from a previous
-    // tick, so rapid scrolling just keeps the sound alive. Only once scrolling
-    // actually stops does the scheduled fade-out get to run.
+    fetch("/sound/bmw-sound.mp3")
+      .then((res) => res.arrayBuffer())
+      .then((buf) => ctx.decodeAudioData(buf))
+      .then((decoded) => {
+        audioBufferRef.current = decoded;
+      })
+      .catch(() => {});
+
+    // Browsers only let an AudioContext run after a trusted user gesture.
+    // Rather than depend on the wheel/touch/key handlers below being the
+    // very first interaction, warm it up on literally the first gesture of
+    // any kind so it's already running well before the first scroll tick.
+    const warmUpAudio = () => {
+      if (ctx.state !== "running") ctx.resume().catch(() => {});
+    };
+    window.addEventListener("pointerdown", warmUpAudio, { once: true });
+    window.addEventListener("keydown", warmUpAudio, { once: true });
+
+    // Every scroll tick fires a fresh, independent source node with a
+    // natively-scheduled gain envelope - a real-feeling rev, not a clipped
+    // tick: quick attack, a genuine hold so the engine's own timbre comes
+    // through, then an easy fade-out (~1.9s total). Because each tick gets
+    // its own node instead of retriggering one shared element, rapid or
+    // long-running scrolling can't leave anything stuck.
+    const fireBlip = () => {
+      const ctx = audioCtxRef.current;
+      const buffer = audioBufferRef.current;
+      if (!ctx || !buffer || mutedRef.current) return;
+
+      const now = ctx.currentTime;
+      const attack = 0.08;
+      const hold = 0.25;
+      const fade = 0.65;
+
+      const source = ctx.createBufferSource();
+      source.buffer = buffer;
+      source.playbackRate.value = 1 + Math.random() * 0.06;
+
+      const gain = ctx.createGain();
+      gain.gain.setValueAtTime(0, now);
+      gain.gain.linearRampToValueAtTime(0.9, now + attack);
+      gain.gain.setValueAtTime(0.9, now + attack + hold);
+      gain.gain.linearRampToValueAtTime(0, now + attack + hold + fade);
+
+      source.connect(gain).connect(ctx.destination);
+      source.start(now);
+      source.stop(now + attack + hold + fade + 0.05);
+
+      activeSourcesRef.current.add(source);
+      source.onended = () => {
+        activeSourcesRef.current.delete(source);
+        source.disconnect();
+        gain.disconnect();
+      };
+    };
+
+    // Browsers auto-suspend an idle AudioContext (e.g. after a pause between
+    // scrolls), and resume() is asynchronous - scheduling immediately against
+    // ctx.currentTime while still suspended reads a stale/frozen clock, so
+    // the scheduled event can land in the past once it actually resumes and
+    // silently produce no sound. Always wait for a running context first.
     const playBlip = () => {
-      const a = engineAudio.current;
-      if (!a || mutedRef.current) return;
-      gsap.killTweensOf(a);
-      a.currentTime = 0;
-      a.volume = 0;
-      a.playbackRate = 1 + Math.random() * 0.06;
-      a.play().catch(() => {});
-      // Short percussive envelope - a quick tick effect, not the whole clip.
-      gsap.to(a, { volume: 0.5, duration: 0.06, ease: "power1.out" });
-      gsap.to(a, {
-        volume: 0,
-        duration: 0.3,
-        delay: 0.16,
-        ease: "power1.out",
-        onComplete: () => a.pause(),
-      });
+      const ctx = audioCtxRef.current;
+      if (!ctx || mutedRef.current) return;
+      if (ctx.state !== "running") {
+        ctx.resume().then(fireBlip).catch(() => {});
+      } else {
+        fireBlip();
+      }
     };
 
     const setCaptionUI = (index: number, visible: boolean) => {
@@ -455,7 +526,7 @@ export default function Experience() {
     };
 
     const runFinaleSequence = (onDone: () => void) => {
-      const tl = gsap.timeline({ delay: 0.9, onComplete: onDone });
+      const tl = gsap.timeline({ delay: 0.6, onComplete: onDone });
       tl.to(camState.current, {
         x: FINALE_DEPARTURE.position[0],
         y: FINALE_DEPARTURE.position[1],
@@ -464,11 +535,11 @@ export default function Experience() {
         ly: FINALE_DEPARTURE.lookAt[1],
         lz: FINALE_DEPARTURE.lookAt[2],
         fov: FINALE_DEPARTURE.fov,
-        duration: 2.2,
+        duration: 1.5,
         ease: "power1.in",
       })
-        .to(finaleFadeRef.current, { opacity: 1, duration: 0.9 }, "-=0.4")
-        .to(finaleWordmarkRef.current, { opacity: 1, y: 0, filter: "blur(0px)", duration: 1.0 }, "-=0.2");
+        .to(finaleFadeRef.current, { opacity: 1, duration: 0.6 }, "-=0.3")
+        .to(finaleWordmarkRef.current, { opacity: 1, y: 0, filter: "blur(0px)", duration: 0.65 }, "-=0.15");
       finaleTimeline.current = tl;
     };
 
@@ -523,6 +594,8 @@ export default function Experience() {
       setSceneUI(clamped, true);
     };
 
+    goToSceneRef.current = goToScene;
+
     let touchStartY = 0;
     let touchConsumed = false;
 
@@ -560,17 +633,25 @@ export default function Experience() {
       window.removeEventListener("touchstart", onTouchStart);
       window.removeEventListener("touchmove", onTouchMove);
       window.removeEventListener("keydown", onKey);
+      window.removeEventListener("pointerdown", warmUpAudio);
+      window.removeEventListener("keydown", warmUpAudio);
       gsap.killTweensOf(camState.current);
       finaleTimeline.current?.kill();
-      if (engineAudio.current) {
-        engineAudio.current.pause();
-        engineAudio.current.src = "";
-      }
+      activeSourcesRef.current.forEach((s) => {
+        try {
+          s.stop();
+        } catch {}
+      });
+      activeSourcesRef.current.clear();
+      ctx.close().catch(() => {});
     };
   }, []);
 
   return (
-    <div className="relative h-screen w-full overflow-hidden bg-black">
+    <div
+      className="relative h-dvh w-full overflow-hidden bg-black overscroll-none"
+      style={{ touchAction: "none" }}
+    >
       <Canvas dpr={1} gl={{ antialias: false, powerPreference: "high-performance" }}>
         <fog attach="fog" args={["#0a0c10", 14, 32]} />
         <ambientLight intensity={0.5} />
@@ -609,24 +690,72 @@ export default function Experience() {
       <SoundToggleButton muted={muted} onToggle={() => setMuted((m) => !m)} />
       <LoadingOverlay ready={ready} />
 
-      {/* Scene 0: hero wordmark + hint */}
-      <div ref={heroWordmarkRef} className="pointer-events-none absolute inset-x-0 top-[7%] flex flex-col items-center gap-3 opacity-0">
-        <span className="text-4xl sm:text-6xl text-white tracking-[0.08em] font-[family-name:var(--font-display)] font-extrabold" style={TEXT_GLOW}>
-          BMW M4
-        </span>
-        <span className="text-xs sm:text-sm tracking-[0.55em] text-white/85 uppercase" style={TEXT_GLOW}>
-          Competition · M xDrive
-        </span>
-        <span className="flex h-[3px] w-16 overflow-hidden rounded-full" style={{ boxShadow: "0 0 12px rgba(0,0,0,0.6)" }}>
-          <span className="flex-1 bg-[#1b4fd6]" />
-          <span className="flex-1 bg-[#5c3fd6]" />
-          <span className="flex-1 bg-[#d61f36]" />
-        </span>
+      {/* Scene 0: hero headline (top-left) */}
+      <div ref={heroWordmarkRef} className="pointer-events-none absolute inset-x-0 top-[9%] px-6 sm:px-14 opacity-0">
+        <div className="max-w-xl">
+          <div className="flex items-center gap-3">
+            <span className="text-[10px] tracking-[0.5em] text-white/70 uppercase" style={TEXT_GLOW}>
+              BMW M4 · Competition
+            </span>
+            <span className="flex h-[3px] w-10 overflow-hidden rounded-full" style={{ boxShadow: "0 0 12px rgba(0,0,0,0.6)" }}>
+              <span className="flex-1 bg-[#1b4fd6]" />
+              <span className="flex-1 bg-[#5c3fd6]" />
+              <span className="flex-1 bg-[#d61f36]" />
+            </span>
+          </div>
+          <h1
+            className="mt-4 font-[family-name:var(--font-serif)] font-normal text-4xl sm:text-6xl leading-[1.05] text-white"
+            style={TEXT_GLOW}
+          >
+            Power without compromise.
+          </h1>
+          <p className="mt-5 max-w-md text-sm sm:text-base text-white/70 font-light" style={TEXT_GLOW}>
+            Twin-turbocharged performance and track-tuned precision, engineered
+            for the road and built for the limit.
+          </p>
+        </div>
       </div>
-      <div ref={heroHintRef} className="pointer-events-none absolute inset-x-0 bottom-[8%] flex flex-col items-center opacity-0">
-        <span className="text-[10px] tracking-[0.5em] text-white/90 uppercase" style={TEXT_GLOW}>
-          Drag to explore — scroll for the full story
-        </span>
+
+      {/* Scene 0: stats (bottom-left) + CTAs (bottom-right) */}
+      <div ref={heroHintRef} className="pointer-events-none absolute inset-x-0 bottom-[7%] px-6 sm:px-14 opacity-0">
+        <div className="flex flex-col gap-6 sm:flex-row sm:items-end sm:justify-between">
+          <div className="flex gap-5 sm:gap-12">
+            {[
+              { value: "503", label: "Horsepower" },
+              { value: "3.5s", label: "0–100 km/h" },
+              { value: "250", label: "Top speed km/h" },
+            ].map((s) => (
+              <div key={s.label}>
+                <div
+                  className="font-[family-name:var(--font-display)] font-semibold text-2xl sm:text-3xl text-white"
+                  style={TEXT_GLOW}
+                >
+                  {s.value}
+                </div>
+                <div className="mt-1 text-[10px] tracking-[0.3em] text-white/55 uppercase" style={TEXT_GLOW}>
+                  {s.label}
+                </div>
+              </div>
+            ))}
+          </div>
+          <div className="pointer-events-auto flex flex-wrap items-center gap-4 sm:gap-6">
+            <button
+              type="button"
+              onClick={() => goToSceneRef.current(1)}
+              className="border-b border-white/30 pb-1 text-[11px] tracking-[0.2em] sm:tracking-[0.3em] uppercase text-white/70 transition hover:border-white/70 hover:text-white active:text-white"
+            >
+              Explore the design
+            </button>
+            <button
+              type="button"
+              onClick={() => goToSceneRef.current(ENGINE_SCENE)}
+              className="group inline-flex items-center gap-3 border border-white/70 px-5 py-3 sm:px-7 text-[11px] tracking-[0.2em] sm:tracking-[0.3em] uppercase text-white transition hover:bg-white hover:text-black active:bg-white active:text-black"
+            >
+              See performance specs
+              <span className="transition-transform duration-300 group-hover:translate-x-1">→</span>
+            </button>
+          </div>
+        </div>
       </div>
 
       {/* Scenes 1,2,3,4 (generic captions, bottom-center) */}
@@ -644,7 +773,7 @@ export default function Experience() {
                 {c.eyebrow}
               </span>
             )}
-            <h2 className="font-[family-name:var(--font-display)] font-semibold text-2xl sm:text-4xl text-white tracking-wide" style={TEXT_GLOW}>
+            <h2 className="font-[family-name:var(--font-serif)] font-normal text-2xl sm:text-4xl text-white tracking-wide" style={TEXT_GLOW}>
               {c.title}
             </h2>
             {c.body && (
@@ -663,7 +792,7 @@ export default function Experience() {
       >
         <div>
           <span className="text-[10px] tracking-[0.5em] text-black/50 uppercase">Under the skin</span>
-          <h2 className="font-[family-name:var(--font-display)] font-semibold text-2xl sm:text-4xl text-black tracking-wide mt-3">
+          <h2 className="font-[family-name:var(--font-serif)] font-normal text-2xl sm:text-4xl text-black tracking-wide mt-3">
             The heart of the machine.
           </h2>
         </div>
@@ -691,11 +820,14 @@ export default function Experience() {
       {/* Scene 8: finale fade + wordmark */}
       <div ref={finaleFadeRef} className="pointer-events-none absolute inset-0 bg-black opacity-0" />
       <div ref={finaleWordmarkRef} className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center gap-4 opacity-0">
-        <span className="text-2xl sm:text-3xl text-white tracking-[0.15em] font-[family-name:var(--font-display)] font-medium" style={TEXT_GLOW}>
+        <span
+          className="font-[family-name:var(--font-serif)] font-normal text-3xl sm:text-5xl text-white tracking-wide"
+          style={TEXT_GLOW}
+        >
           BMW M4
         </span>
         <h2
-          className="font-[family-name:var(--font-display)] font-light text-lg sm:text-2xl text-white/90 tracking-[0.25em] text-center px-6"
+          className="text-[10px] tracking-[0.4em] sm:tracking-[0.5em] uppercase text-white/70 text-center px-6"
           style={TEXT_GLOW}
         >
           Performance, experienced differently.
