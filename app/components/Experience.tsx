@@ -242,7 +242,7 @@ function GradientBackdrop() {
   return (
     <mesh scale={40}>
       <sphereGeometry args={[1, 32, 32]} />
-      <meshBasicMaterial color="#0a0c10" side={THREE.BackSide} depthWrite={false} fog={false} />
+      <meshBasicMaterial color="#030405" side={THREE.BackSide} depthWrite={false} fog={false} />
     </mesh>
   );
 }
@@ -252,15 +252,18 @@ function StudioFloor() {
     <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, -0.001, 0]}>
       <planeGeometry args={[80, 80]} />
       <MeshReflectorMaterial
-        blur={[300, 80]}
-        resolution={400}
-        mixBlur={3}
-        mixStrength={20}
-        roughness={1}
+        blur={[48, 18]}
+        resolution={1024}
+        mirror={0.45}
+        mixBlur={0.4}
+        mixStrength={3.5}
+        mixContrast={1}
+        roughness={0.28}
+        envMapIntensity={0}
         depthScale={1.1}
-        minDepthThreshold={0.4}
-        maxDepthThreshold={1.3}
-        color="#050506"
+        minDepthThreshold={0.5}
+        maxDepthThreshold={1.2}
+        color="#020203"
         metalness={0.4}
       />
     </mesh>
@@ -653,12 +656,12 @@ export default function Experience() {
       style={{ touchAction: "none" }}
     >
       <Canvas dpr={1} gl={{ antialias: false, powerPreference: "high-performance" }}>
-        <fog attach="fog" args={["#0a0c10", 14, 32]} />
-        <ambientLight intensity={0.5} />
-        <directionalLight position={[4, 6, 4]} intensity={2.6} color="#fff4e0" />
-        <directionalLight position={[-5, 2, -4]} intensity={0.9} color="#4a6fff" />
-        <directionalLight position={[0, 3, -6]} intensity={0.6} color="#ffffff" />
-        <Environment preset="night" environmentIntensity={0.75} />
+        <fog attach="fog" args={["#030405", 6, 19]} />
+        <ambientLight intensity={0.16} />
+        <directionalLight position={[4, 6, 4]} intensity={2.4} color="#f2f4ff" />
+        <directionalLight position={[-5, 2, -4]} intensity={0.4} color="#3a5be0" />
+        <directionalLight position={[0, 7, -6]} intensity={0.3} color="#ffffff" />
+        <Environment preset="night" environmentIntensity={0.4} />
 
         <GradientBackdrop />
         <CameraRig heroActive={heroActive} camState={camState} />
@@ -673,18 +676,18 @@ export default function Experience() {
         />
 
         <StudioFloor />
-        <ContactShadows frames={1} position={[0, 0.001, 0]} opacity={0.7} scale={14} blur={2.4} far={4} />
+        <ContactShadows frames={1} position={[0, 0.001, 0]} opacity={0.65} scale={14} blur={1.8} far={4} />
 
         <EffectComposer>
-          <Bloom luminanceThreshold={0.55} intensity={0.7} mipmapBlur radius={0.5} />
-          <Vignette eskil={false} offset={0.15} darkness={0.7} />
+          <Bloom luminanceThreshold={0.92} intensity={0.4} mipmapBlur radius={0.3} />
+          <Vignette eskil={false} offset={0.1} darkness={0.92} />
         </EffectComposer>
       </Canvas>
 
       {/* Persistent vignette for cinematic framing */}
       <div
         className="pointer-events-none absolute inset-0"
-        style={{ background: "radial-gradient(ellipse at center, transparent 45%, rgba(0,0,0,0.5) 100%)" }}
+        style={{ background: "radial-gradient(ellipse at center, transparent 40%, rgba(0,0,0,0.75) 100%)" }}
       />
 
       <SoundToggleButton muted={muted} onToggle={() => setMuted((m) => !m)} />
@@ -832,6 +835,19 @@ export default function Experience() {
         >
           Performance, experienced differently.
         </h2>
+      </div>
+
+      {/* Persistent site credit */}
+      <div className="pointer-events-none absolute inset-x-0 bottom-2 z-40 flex justify-center">
+        <a
+          href="https://www.calvero.site/start-a-project"
+          target="_blank"
+          rel="noopener noreferrer"
+          className="pointer-events-auto text-[10px] tracking-[0.15em] text-white/40 transition hover:text-white/80"
+          style={TEXT_GLOW}
+        >
+          Concept project by Calvero
+        </a>
       </div>
     </div>
   );
